@@ -1,108 +1,205 @@
-from flask import Flask, render_template, request, jsonify
+import dash
+from dash import dcc, html, Input, Output, State
 import pandas as pd
 import plotly.express as px
-from io import BytesIO
 import base64
+import io
 
-app = Flask(__name__)
-app.secret_key = 'ash'
+external_stylesheets = ['https://codepen.io/chriddyp/pen/bWLwgP.css']
+
+app = dash.Dash(__name__, external_stylesheets=external_stylesheets)
+app.config.suppress_callback_exceptions = True
+app.title = 'Data Visualization'
+
 loaded_data = None
 
-@app.route('/')
-def index():
-    return render_template('index.html')
+app.layout = html.Div([
+    dcc.Upload(
+        id='upload-data',
+        children=html.Div([
+            'Drag and Drop or ',
+            html.A('Select Files')
+        ]),
+        style={
+    'width': '97.8%',
+    'height': '60px',
+    'lineHeight': '60px',
+    'borderWidth': '4px',
+    'borderStyle': 'solid',
+    'borderColor': '#4CAF50', 
+    'borderRadius': '10px',
+    'textAlign': 'center',
+    'margin': '10px',
+    'backgroundColor': '#f0f0f0', 
+    'color': '#333',
+    'fontFamily': 'Arial, sans-serif', 
+    'fontSize': '1.2em', 
+    'cursor': 'pointer', 
+    'transition': 'background-color 0.3s ease',  
+},
 
-@app.route('/upload', methods=['POST'])
-def upload():
+
+
+        multiple=True
+    ),
+    html.Div(id='output-data-upload'),
+])
+
+def parse_contents(contents, filename):
     global loaded_data
-    file = request.files['file']
-    if file:
-        loaded_data = pd.read_excel(file)
-        print(loaded_data.dtypes)
-
-        columns = list(loaded_data.columns)
-        return render_template('upload.html', columns=columns)
-    return render_template('index.html', error="File not provided.")
-
-@app.route('/plot', methods=['POST'])
-def plot():
-    if loaded_data is None:
-        return render_template('upload.html', error="No data loaded.")
+    content_type, content_string = contents.split(',')
     
-    selected_columns = request.form.getlist('columns')
-    if not selected_columns:
-        return render_template('upload.html', error="Select at least one column.")
+    decoded = pd.read_excel(io.BytesIO(base64.b64decode(content_string)))
+    loaded_data = decoded
+    
+    columns = list(decoded.columns)
+    
+    return html.Div([
+        html.H6(filename),
+        html.H6([html.B('Select Columns:')], className='column-select-header'),
+        dcc.Dropdown(
+            id='column-dropdown',
+            options=[{'label': i, 'value': i} for i in columns],
+            multi=True
+        ),
+        html.Div(id='output-datatype')
+    ])
 
-    chart_type = request.form.get('chart_type', 'bar')
+@app.callback(Output('output-data-upload', 'children'),
+              [Input('upload-data', 'contents')],
+              [State('upload-data', 'filename')])
+def update_output(list_of_contents, list_of_names):
+    if list_of_contents is not None:
+        children = [
+            parse_contents(c, n) for c, n in
+            zip(list_of_contents, list_of_names)]
+        return children
 
-    try:
-        if chart_type == 'bar':
-            plotly_fig = render_bar_chart(selected_columns)
-        elif chart_type == 'line':
-            plotly_fig = render_ver_bar_chart(selected_columns)
-        elif chart_type == 'pie':
-            plotly_fig = generate_pie_chart(selected_columns)
-        elif chart_type== 'scatter':
-            plotly_fig = render_scatter_plot(selected_columns)
-        else:
-            raise ValueError("Invalid chart type.")
-    except Exception as e:
-        return render_template('upload.html', error=f"Error generating plot: {str(e)}")
+@app.callback(
+    Output('output-datatype', 'children'),
+    [Input('column-dropdown', 'value')]
+)
+def update_datatype(selected_columns):
+    if selected_columns is not None:
+        options = [
+            {'label': 'Bar Chart', 'value': 'bar'},
+            {'label': 'Vertical Bar Chart', 'value': 'ver_bar'},
+            {'label': 'Line Chart', 'value': 'line'},
+            {'label': 'Pie Chart', 'value': 'pie'},
+            {'label': 'Scatter Plot', 'value': 'scatter'}
+        ]
+        return html.Div([
+            dcc.Dropdown(
+                id='chart-type',
+                options=options,
+                value='bar'
+            ),
+            html.Button('Plot', id='plot-button'),
+            html.Div(id='output-plot')
+        ])
+    else:
+        return ''
 
-    try:
-        plotly_html = plotly_fig.to_html(full_html=False)
-    except Exception as e:
-        return render_template('upload.html', error=f"Error converting plot to HTML: {str(e)}")
-
-    return render_template('plotly_template.html', plotly_html=plotly_html)
-
+@app.callback(
+    Output('output-plot', 'children'),
+    [Input('plot-button', 'n_clicks')],
+    [State('column-dropdown', 'value'),
+     State('chart-type', 'value')]
+)
+def plot(n_clicks, selected_columns, chart_type):
+    if n_clicks:
+        try:
+            if chart_type == 'bar':
+                plotly_fig = render_bar_chart(selected_columns)
+            elif chart_type == 'ver_bar':
+                plotly_fig = render_ver_bar_chart(selected_columns)
+            elif chart_type == 'line':
+                plotly_fig = render_line_chart(selected_columns)
+            elif chart_type == 'pie':
+                plotly_fig = generate_pie_chart(selected_columns)
+            elif chart_type == 'scatter':
+                plotly_fig = render_scatter_plot(selected_columns)
+            else:
+                raise ValueError("Invalid chart type.")
+                
+            return dcc.Graph(figure=plotly_fig)
+        except Exception as e:
+            return f"Error generating plot: {str(e)}"
 
 def render_bar_chart(selected_columns):
-    if len(selected_columns) != 2:
-        return render_template('upload.html', error="Select exactly two columns for bar chart.")
-
-    group_column, sum_column = selected_columns
+    if loaded_data is None or len(selected_columns) < 2 or len(selected_columns) > 4:
+        return html.Div("Select between two to four columns for bar chart.")
     
-    grouped_data = loaded_data.groupby(group_column)[sum_column].sum().reset_index()
+    group_column = selected_columns[0]
+    sum_columns = selected_columns[1:]
 
-    fig = px.bar(grouped_data, x=sum_column, y=group_column, 
+    grouped_data = loaded_data.groupby(group_column)[sum_columns].sum().reset_index()
+    fig = px.bar(grouped_data, x=sum_columns, y=group_column,
                  orientation='h',
-                 title=f'Horizontal Bar Chart of Total {sum_column} by {group_column}',
-                 labels={sum_column: f"Total {sum_column}"})
+                 title=f'Horizontal Bar Chart of {", ".join(sum_columns)} by {group_column}',
+                 labels={col: f"Total {col}" for col in sum_columns},
+                 category_orders={group_column: sorted(grouped_data[group_column].unique())},
+                 barmode='group') 
+    fig.update_layout(height=700, width=1098, showlegend=True)
+    fig.update_traces(marker=dict(line=dict(width=0.8)))
     return fig
 
-
-
 def render_ver_bar_chart(selected_columns):
-    if len(selected_columns) != 2:
-        return render_template('upload.html', error="Select exactly two columns for bar chart.")
+    if loaded_data is None or len(selected_columns) < 2 or len(selected_columns) > 4:
+        return html.Div("Select between two to four columns for bar chart.")
 
-    group_column, sum_column = selected_columns
+    group_column = selected_columns[0]
+    sum_columns = selected_columns[1:]
 
-    grouped_data = loaded_data.groupby(group_column)[sum_column].sum().reset_index()
+    grouped_data = loaded_data.groupby(group_column)[sum_columns].sum().reset_index()
 
-    fig = px.scatter(grouped_data, x=group_column, y=sum_column, 
-                 title=f'Vertical Bar Chart of Total {sum_column} by {group_column}',
-                 labels={sum_column: f"Total {sum_column}"})
+    
+    fig = px.bar(grouped_data, x=group_column, y=sum_columns,
+                 orientation='v', 
+                 title=f'Vertical Bar Chart of {", ".join(sum_columns)} by {group_column}',
+                 labels={col: f"Total {col}" for col in sum_columns},
+                 category_orders={group_column: sorted(grouped_data[group_column].unique())},
+                 barmode='group')
+
+    fig.update_layout(height=700, width=1098, showlegend=True)
+    fig.update_traces(marker=dict(line=dict(width=0.8)))
+    return fig
+  
+def render_line_chart(selected_columns):
+    if loaded_data is None or len(selected_columns) < 2 or len(selected_columns) > 4:
+        return html.Div("Select between two to four columns for bar chart.")
+    x_column, y_column = selected_columns
+
+    fig = px.line(loaded_data, x=x_column, y=y_column, title=f'Line Chart: {y_column} over {x_column}',
+                  labels={x_column: f'{x_column}', y_column: f'{y_column}'},
+                  markers=True) 
+    fig.update_layout(height=600,width=1078)
     return fig
 
 def render_scatter_plot(selected_columns):
-    if len(selected_columns) != 2:
-        return render_template('upload.html', error="Select exactly two columns for scatter plot.")
+    if loaded_data is None or len(selected_columns) != 2:
+        return html.Div("Select exactly two columns for scatter plot.")
 
     x_column, y_column = selected_columns
 
     fig = px.scatter(loaded_data, x=x_column, y=y_column,
                      title=f'Scatter Plot: {y_column} vs {x_column}',
                      labels={x_column: f"{x_column}", y_column: f"{y_column}"})
-    
     return fig
 
-def generate_pie_chart(selected_columns):
-    fig = px.pie(loaded_data, names=selected_columns[0], values=selected_columns[1], 
+def generate_pie_chart(selected_columns, filters=None):
+    if loaded_data is None or filters is not None:
+        filtered_data = loaded_data.copy() 
+        for column, value in filters.items():
+            filtered_data = filtered_data[filtered_data[column] == value]
+    else:
+        filtered_data = loaded_data
+
+    fig = px.pie(filtered_data, names=selected_columns[0], values=selected_columns[1], 
                  title=f'Pie Chart for {selected_columns[0].capitalize()} ({selected_columns[1].capitalize()})')
-    
+    fig.update_traces(textposition='inside', textinfo='percent+label')
+    fig.update_layout(width=750, height=750)
     return fig
-
+    
 if __name__ == '__main__':
-    app.run(debug=True)
+    app.run_server(debug=True)
